@@ -36,6 +36,47 @@ def send_bdpu_every_sec():
         # TODO Send BDPU every second if necessary
         time.sleep(1)
 
+def read_config(switch_id):
+    port_table = {}
+
+    try:
+        with open(f'configs/switch{switch_id}.cfg', 'rt') as config:
+            switch_bid = int(config.readline())
+            for line in config:
+                key, value = line.split()
+                port_table[key] = value if value == 'T' else int(value)
+            
+            return switch_bid, port_table
+    except ValueError:
+        sys.exit('Invalid VLAN id!')
+    except:
+        sys.exit('The configuration file could not be opened!')
+
+def send_with_vlan(port_table, src_interface, dest_interface, frame_info):
+    # Extract frame data
+    data, length, vlan_id = frame_info
+    has_vlan_hddr = vlan_id != -1
+
+    # Get VLAN ids
+    dest_vlan = port_table.get(get_interface_name(dest_interface))
+    src_vlan = port_table.get(get_interface_name(src_interface))
+    vlan_id = src_vlan if not has_vlan_hddr else vlan_id
+
+    # Exit if VLAN ids are not found
+    if dest_vlan is None or src_vlan is None:
+        return
+
+    if dest_vlan == 'T':
+        if not has_vlan_hddr:
+            data = data[0:12] + create_vlan_tag(src_vlan) + data[12:]
+            length += 4
+        send_to_link(dest_interface, length, data)
+    elif dest_vlan == vlan_id:
+        if has_vlan_hddr:
+            data = data[0:12] + data[16:]
+            length -= 4
+        send_to_link(dest_interface, length, data)
+
 def main():
     # init returns the max interface number. Our interfaces
     # are 0, 1, 2, ..., init_ret value + 1
@@ -44,56 +85,33 @@ def main():
     num_interfaces = wrapper.init(sys.argv[2:])
     interfaces = range(0, num_interfaces)
 
+    switch_bid, port_table = read_config(switch_id)
+    mac_table = {}
+
     print("# Starting switch with id {}".format(switch_id), flush=True)
     print("[INFO] Switch MAC", ':'.join(f'{b:02x}' for b in get_switch_mac()))
 
     # Create and start a new thread that deals with sending BDPU
     t = threading.Thread(target=send_bdpu_every_sec)
-    t.start()
-
-    # Printing interface names
-    for i in interfaces:
-        print(get_interface_name(i))
-
-    mac_table = {}
+    t.start()    
 
     while True:
-        # Note that data is of type bytes([...]).
-        # b1 = bytes([72, 101, 108, 108, 111])  # "Hello"
-        # b2 = bytes([32, 87, 111, 114, 108, 100])  # " World"
-        # b3 = b1[0:2] + b[3:4].
         interface, data, length = recv_from_any_link()
-
         dest_mac, src_mac, ethertype, vlan_id = parse_ethernet_header(data)
 
-        # Print the MAC src and MAC dst in human readable format
-        dest_mac = ':'.join(f'{b:02x}' for b in dest_mac)
-        src_mac = ':'.join(f'{b:02x}' for b in src_mac)
-
-        # Note. Adding a VLAN tag can be as easy as
-        # tagged_frame = data[0:12] + create_vlan_tag(10) + data[12:]
-
-        print(f'Destination MAC: {dest_mac}')
-        print(f'Source MAC: {src_mac}')
-        print(f'EtherType: {ethertype}')
-
-        print("Received frame of size {} on interface {}".format(length, interface), flush=True)
-
-        # TODO: Implement forwarding with learning
         mac_table[src_mac] = interface
+        frame_info = data, length, vlan_id
 
+        # TODO: check unicast
         if dest_mac != BROADCAST_MAC and dest_mac in mac_table:
-            send_to_link(mac_table[dest_mac], length, data)
+            send_with_vlan(port_table, interface, mac_table[dest_mac], frame_info)
         else:
             for i in interfaces:
                 if i != interface:
-                    send_to_link(i, length, data)
+                    send_with_vlan(port_table, interface, i, frame_info)
 
-        # TODO: Implement VLAN support
+        
         # TODO: Implement STP support
-
-        # data is of type bytes.
-        # send_to_link(i, length, data)
 
 if __name__ == "__main__":
     main()
