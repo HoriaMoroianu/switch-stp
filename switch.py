@@ -6,6 +6,8 @@ import threading
 import time
 from wrapper import recv_from_any_link, send_to_link, get_switch_mac, get_interface_name
 
+BROADCAST_MAC = 0xFFFFFFFFFFFF
+
 def parse_ethernet_header(data):
     # Unpack the header fields from the byte array
     #dest_mac, src_mac, ethertype = struct.unpack('!6s6sH', data[:14])
@@ -53,6 +55,8 @@ def main():
     for i in interfaces:
         print(get_interface_name(i))
 
+    mac_table = {}
+
     while True:
         # Note that data is of type bytes([...]).
         # b1 = bytes([72, 101, 108, 108, 111])  # "Hello"
@@ -76,6 +80,15 @@ def main():
         print("Received frame of size {} on interface {}".format(length, interface), flush=True)
 
         # TODO: Implement forwarding with learning
+        mac_table[src_mac] = interface
+
+        if dest_mac != BROADCAST_MAC and dest_mac in mac_table:
+            send_to_link(mac_table[dest_mac], length, data)
+        else:
+            for i in interfaces:
+                if i != interface:
+                    send_to_link(i, length, data)
+
         # TODO: Implement VLAN support
         # TODO: Implement STP support
 
