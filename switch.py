@@ -6,6 +6,42 @@ import threading
 import time
 from wrapper import recv_from_any_link, send_to_link, get_switch_mac, get_interface_name
 
+BPDU_DEST_MAC = b'\x01\x80\xC2\x00\x00\x00'
+
+# DST_MAC|SRC_MAC|LLC_LENGTH|LLC_HEADER|BPDU_HEADER|BPDU_CONFIG
+BPDU_FORMAT = '!6s 6s H 3s I B 8s I 8s H H H H H'
+
+# DSAP|SSAP|Control
+LLC_HEADER = b'\x42\x42\x03'
+
+# Port states
+BLOCKED_PORT = 0
+DESIGNATED_PORT = 1
+
+# Global var
+own_bridge_id = 0
+root_bridge_id = 0
+lock = threading.Lock()
+
+def create_bpdu(root_bridge_id, root_path_cost, bridge_id, port_id):
+    return struct.pack(
+        BPDU_FORMAT,
+        BPDU_DEST_MAC,
+        get_switch_mac(),
+        38,                 # 38 bytes long fixed payload
+        LLC_HEADER,
+        0,                  # Protocol ID|Protocol version ID|BPDU type
+        0,                  # Flags
+        root_bridge_id,
+        root_path_cost,
+        bridge_id,
+        port_id,
+        1,                  # Message age
+        20,                 # Max age
+        2,                  # Hello time
+        15                  # Forward delay                 
+    )
+
 def parse_ethernet_header(data):
     # Unpack the header fields from the byte array
     #dest_mac, src_mac, ethertype = struct.unpack('!6s6sH', data[:14])
@@ -31,19 +67,26 @@ def create_vlan_tag(vlan_id):
 
 def send_bdpu_every_sec():
     while True:
-        # TODO Send BDPU every second if necessary
+        lock.acquire()
+        if root_bridge_id == own_bridge_id:
+            # TODO Send BPDU on all trunk ports
+            pass
+        lock.release()
         time.sleep(1)
+
+def handle_bpdu():
+    pass
 
 def read_config(switch_id):
     port_table = {}
     try:
         with open(f'configs/switch{switch_id}.cfg', 'rt') as config:
-            switch_bid = int(config.readline())
+            switch_priority = int(config.readline())
             for line in config:
                 key, value = line.split()
                 port_table[key] = value if value == 'T' else int(value)
             
-            return switch_bid, port_table
+            return switch_priority, port_table
     except ValueError:
         sys.exit('Invalid port configuration values!')
     except:
@@ -85,15 +128,21 @@ def main():
     num_interfaces = wrapper.init(sys.argv[2:])
     interfaces = range(0, num_interfaces)
 
-    switch_bid, port_table = read_config(switch_id)
-    mac_table = {}
+    own_bridge_id, port_table = read_config(switch_id)
 
-    print("# Starting switch with id {}".format(switch_id), flush=True)
-    print("[INFO] Switch MAC", ':'.join(f'{b:02x}' for b in get_switch_mac()))
+    # Consider this device as root bridge
+    root_bridge_id = own_bridge_id
+    root_path_cost = 0
+
+    port_states = {}
+    for i in interfaces:
+        port_states[i] = DESIGNATED_PORT
 
     # Create and start a new thread that deals with sending BDPU
     t = threading.Thread(target=send_bdpu_every_sec)
-    t.start()    
+    t.start()
+
+    mac_table = {}
 
     while True:
         interface, data, length = recv_from_any_link()
