@@ -6,8 +6,6 @@ import threading
 import time
 from wrapper import recv_from_any_link, send_to_link, get_switch_mac, get_interface_name
 
-BROADCAST_MAC = 0xFFFFFFFFFFFF
-
 def parse_ethernet_header(data):
     # Unpack the header fields from the byte array
     #dest_mac, src_mac, ethertype = struct.unpack('!6s6sH', data[:14])
@@ -38,7 +36,6 @@ def send_bdpu_every_sec():
 
 def read_config(switch_id):
     port_table = {}
-
     try:
         with open(f'configs/switch{switch_id}.cfg', 'rt') as config:
             switch_bid = int(config.readline())
@@ -48,31 +45,34 @@ def read_config(switch_id):
             
             return switch_bid, port_table
     except ValueError:
-        sys.exit('Invalid VLAN id!')
+        sys.exit('Invalid port configuration values!')
     except:
-        sys.exit('The configuration file could not be opened!')
+        sys.exit('Port configuration failed!')
 
 def send_with_vlan(port_table, src_interface, dest_interface, frame_info):
     # Extract frame data
     data, length, vlan_id = frame_info
-    has_vlan_hddr = vlan_id != -1
+    has_vlan_tag = vlan_id != -1
 
     # Get VLAN ids
     dest_vlan = port_table.get(get_interface_name(dest_interface))
     src_vlan = port_table.get(get_interface_name(src_interface))
-    vlan_id = src_vlan if not has_vlan_hddr else vlan_id
+    vlan_id = src_vlan if not has_vlan_tag else vlan_id
 
     # Exit if VLAN ids are not found
     if dest_vlan is None or src_vlan is None:
         return
 
     if dest_vlan == 'T':
-        if not has_vlan_hddr:
+        # Send to trunk port
+        if not has_vlan_tag:
             data = data[0:12] + create_vlan_tag(src_vlan) + data[12:]
             length += 4
         send_to_link(dest_interface, length, data)
+
     elif dest_vlan == vlan_id:
-        if has_vlan_hddr:
+        # Send to access port
+        if has_vlan_tag:
             data = data[0:12] + data[16:]
             length -= 4
         send_to_link(dest_interface, length, data)
@@ -102,15 +102,13 @@ def main():
         mac_table[src_mac] = interface
         frame_info = data, length, vlan_id
 
-        # TODO: check unicast
-        if dest_mac != BROADCAST_MAC and dest_mac in mac_table:
+        if (dest_mac[0] & 1) == 0 and dest_mac in mac_table:
             send_with_vlan(port_table, interface, mac_table[dest_mac], frame_info)
         else:
             for i in interfaces:
                 if i != interface:
                     send_with_vlan(port_table, interface, i, frame_info)
 
-        
         # TODO: Implement STP support
 
 if __name__ == "__main__":
