@@ -21,9 +21,11 @@ DESIGNATED_PORT = 1
 # Global var
 own_bridge_id = 0
 root_bridge_id = 0
+root_path_cost = 0
+port_states = {}
 lock = threading.Lock()
 
-def create_bpdu(root_bridge_id, root_path_cost, bridge_id, port_id):
+def create_bpdu(port_id):
     return struct.pack(
         BPDU_FORMAT,
         BPDU_DEST_MAC,
@@ -32,9 +34,9 @@ def create_bpdu(root_bridge_id, root_path_cost, bridge_id, port_id):
         LLC_HEADER,
         0,                  # Protocol ID|Protocol version ID|BPDU type
         0,                  # Flags
-        root_bridge_id,
+        root_bridge_id.to_bytes(8, byteorder='big'),
         root_path_cost,
-        bridge_id,
+        own_bridge_id.to_bytes(8, byteorder='big'),
         port_id,
         1,                  # Message age
         20,                 # Max age
@@ -65,17 +67,66 @@ def create_vlan_tag(vlan_id):
     # vlan_id & 0x0FFF ensures that only the last 12 bits are used
     return struct.pack('!H', 0x8200) + struct.pack('!H', vlan_id & 0x0FFF)
 
-def send_bdpu_every_sec():
+def send_bdpu_every_sec(trunk_ports):
     while True:
         lock.acquire()
         if root_bridge_id == own_bridge_id:
-            # TODO Send BPDU on all trunk ports
-            pass
+            for p in trunk_ports:
+                if port_states[p] == DESIGNATED_PORT:
+                    data = create_bpdu(p)
+                    send_to_link(p, len(data), data)
         lock.release()
         time.sleep(1)
 
-def handle_bpdu():
-    pass
+def handle_bpdu(data, interface, trunk_ports, root_port):
+    bpdu = struct.unpack(BPDU_FORMAT, data)
+    bpdu_root_id = int.from_bytes(bpdu[6], byteorder='big')
+    sender_path_cost = bpdu[7]
+    sender_bridge_id = int.from_bytes(bpdu[8], byteorder='big')
+
+    global root_bridge_id
+    global root_path_cost
+    were_root_bridge = (root_bridge_id == own_bridge_id)
+
+    if bpdu_root_id < root_bridge_id:
+        # Update the root bridge
+        lock.acquire()
+
+        root_bridge_id = bpdu_root_id
+        root_path_cost = sender_path_cost + 10
+        root_port = interface
+
+        if were_root_bridge:
+            port_states.update({p: BLOCKED_PORT for p in trunk_ports if p != root_port})
+        
+        if port_states[root_port] == BLOCKED_PORT:
+            port_states[root_port] = DESIGNATED_PORT
+        
+        lock.release()
+    elif bpdu_root_id == root_bridge_id:
+        if interface == root_port and sender_path_cost + 10 < root_path_cost:
+            lock.acquire()
+            root_path_cost = sender_path_cost + 10
+            lock.release()
+        
+        elif interface != root_port:
+            if sender_path_cost > root_path_cost:
+                lock.acquire()
+                port_states[interface] = DESIGNATED_PORT
+                lock.release()
+    elif sender_bridge_id == own_bridge_id:
+        lock.acquire()
+        port_states[interface] = BLOCKED_PORT
+        lock.release()
+    
+    if root_bridge_id == own_bridge_id:
+        lock.acquire()
+        for p in trunk_ports:
+            port_states[p] = DESIGNATED_PORT
+        lock.release()
+
+    return root_port
+        
 
 def read_config(switch_id):
     port_table = {}
@@ -93,6 +144,9 @@ def read_config(switch_id):
         sys.exit('Port configuration failed!')
 
 def send_with_vlan(port_table, src_interface, dest_interface, frame_info):
+    if port_states[dest_interface] == BLOCKED_PORT:
+        return
+
     # Extract frame data
     data, length, vlan_id = frame_info
     has_vlan_tag = vlan_id != -1
@@ -128,18 +182,28 @@ def main():
     num_interfaces = wrapper.init(sys.argv[2:])
     interfaces = range(0, num_interfaces)
 
-    own_bridge_id, port_table = read_config(switch_id)
+    switch_priority, port_table = read_config(switch_id)
 
     # Consider this device as root bridge
+    global own_bridge_id
+    global root_bridge_id
+    global root_path_cost
+    root_port = -1
+
+    own_bridge_id = switch_priority
     root_bridge_id = own_bridge_id
     root_path_cost = 0
 
-    port_states = {}
+    # Set all ports as designated and store trunk ports
+    trunk_ports = []
+
     for i in interfaces:
         port_states[i] = DESIGNATED_PORT
+        if port_table[get_interface_name(i)] == 'T':
+            trunk_ports.append(i)      
 
     # Create and start a new thread that deals with sending BDPU
-    t = threading.Thread(target=send_bdpu_every_sec)
+    t = threading.Thread(target=send_bdpu_every_sec, args=(trunk_ports, ))
     t.start()
 
     mac_table = {}
@@ -147,18 +211,22 @@ def main():
     while True:
         interface, data, length = recv_from_any_link()
         dest_mac, src_mac, ethertype, vlan_id = parse_ethernet_header(data)
-
         mac_table[src_mac] = interface
-        frame_info = data, length, vlan_id
+        
+        if dest_mac == BPDU_DEST_MAC:
+            root_port = handle_bpdu(data, interface, trunk_ports, root_port)
+            continue
 
+        if port_states[interface] == BLOCKED_PORT:
+            continue
+
+        frame_info = data, length, vlan_id
         if (dest_mac[0] & 1) == 0 and dest_mac in mac_table:
             send_with_vlan(port_table, interface, mac_table[dest_mac], frame_info)
         else:
             for i in interfaces:
                 if i != interface:
                     send_with_vlan(port_table, interface, i, frame_info)
-
-        # TODO: Implement STP support
 
 if __name__ == "__main__":
     main()
