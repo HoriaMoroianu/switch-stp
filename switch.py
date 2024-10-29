@@ -1,10 +1,13 @@
+# Copyright (c) 2024 Horia-Valentin MOROIANU
+
 #!/usr/bin/python3
 import sys
 import struct
 import wrapper
 import threading
 import time
-from wrapper import recv_from_any_link, send_to_link, get_switch_mac, get_interface_name
+from wrapper import recv_from_any_link, send_to_link, get_switch_mac, \
+    get_interface_name
 
 BPDU_DEST_MAC = b'\x01\x80\xC2\x00\x00\x00'
 
@@ -144,12 +147,13 @@ def read_config(switch_id):
         sys.exit('Port configuration failed!')
 
 def send_with_vlan(port_table, src_interface, dest_interface, frame_info):
+    # Exit if the port is blocked
     if port_states[dest_interface] == BLOCKED_PORT:
         return
 
     # Extract frame data
     data, length, vlan_id = frame_info
-    has_vlan_tag = vlan_id != -1
+    has_vlan_tag = (vlan_id != -1)
 
     # Get VLAN ids
     dest_vlan = port_table.get(get_interface_name(dest_interface))
@@ -175,10 +179,8 @@ def send_with_vlan(port_table, src_interface, dest_interface, frame_info):
         send_to_link(dest_interface, length, data)
 
 def main():
-    # init returns the max interface number. Our interfaces
-    # are 0, 1, 2, ..., init_ret value + 1
+    # Switch initialization
     switch_id = sys.argv[1]
-
     num_interfaces = wrapper.init(sys.argv[2:])
     interfaces = range(0, num_interfaces)
 
@@ -187,20 +189,17 @@ def main():
     # Consider this device as root bridge
     global own_bridge_id
     global root_bridge_id
-    global root_path_cost
-    root_port = -1
 
     own_bridge_id = switch_priority
     root_bridge_id = own_bridge_id
-    root_path_cost = 0
+    root_port = -1
 
-    # Set all ports as designated and store trunk ports
     trunk_ports = []
-
+    # Set all ports as designated and store trunk ports
     for i in interfaces:
         port_states[i] = DESIGNATED_PORT
         if port_table[get_interface_name(i)] == 'T':
-            trunk_ports.append(i)      
+            trunk_ports.append(i)
 
     # Create and start a new thread that deals with sending BDPU
     t = threading.Thread(target=send_bdpu_every_sec, args=(trunk_ports, ))
@@ -210,20 +209,28 @@ def main():
 
     while True:
         interface, data, length = recv_from_any_link()
-        dest_mac, src_mac, ethertype, vlan_id = parse_ethernet_header(data)
-        mac_table[src_mac] = interface
+        dest_mac, src_mac, _, vlan_id = parse_ethernet_header(data)
         
+        # Remember port-mac link
+        mac_table[src_mac] = interface
+
+        # Check for BPDU
         if dest_mac == BPDU_DEST_MAC:
             root_port = handle_bpdu(data, interface, trunk_ports, root_port)
             continue
 
+        # Drop if received on a blocked port
         if port_states[interface] == BLOCKED_PORT:
             continue
 
         frame_info = data, length, vlan_id
-        if (dest_mac[0] & 1) == 0 and dest_mac in mac_table:
-            send_with_vlan(port_table, interface, mac_table[dest_mac], frame_info)
+        dest_interface = mac_table.get(dest_mac)
+
+        # Check if unicast and found in mac address table
+        if (dest_mac[0] & 1) == 0 and dest_interface is not None:
+            send_with_vlan(port_table, interface, dest_interface, frame_info)
         else:
+            # Broadcast
             for i in interfaces:
                 if i != interface:
                     send_with_vlan(port_table, interface, i, frame_info)
