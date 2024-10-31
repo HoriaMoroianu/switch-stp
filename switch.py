@@ -9,13 +9,19 @@ import time
 from wrapper import recv_from_any_link, send_to_link, get_switch_mac, \
     get_interface_name
 
-BPDU_DEST_MAC = b'\x01\x80\xC2\x00\x00\x00'
-
 # DST_MAC|SRC_MAC|LLC_LENGTH|LLC_HEADER|BPDU_HEADER|BPDU_CONFIG
-BPDU_FORMAT = '!6s 6s H 3s I B 8s I 8s H H H H H'
+BPDU_FORMAT = '!6s 6s H 3s I B8sI8sHHHHH'
 
-# DSAP|SSAP|Control
-LLC_HEADER = b'\x42\x42\x03'
+# Constants for BPDU
+BPDU_DEST_MAC = b'\x01\x80\xC2\x00\x00\x00'
+LLC_LENGTH = 38                 # 38 bytes long fixed payload
+LLC_HEADER = b'\x42\x42\x03'    # DSAP|SSAP|Control
+BPDU_HEADER = 0                 # Protocol ID|Protocol version ID|BPDU type
+FLAGS = 0
+MESSAGE_AGE = 1
+MAX_AGE = 20
+HELLO_TIME = 2
+FORWARD_DELAY = 15
 
 # Port states
 BLOCKED_PORT = 0
@@ -29,23 +35,34 @@ port_states = {}
 lock = threading.Lock()
 
 def create_bpdu(port_id):
+    # Ignore MAC addr
+    root_id = root_bridge_id.to_bytes(2, byteorder='big') + bytes(6)
+    bridge_id = own_bridge_id.to_bytes(2, byteorder='big') + bytes(6)
+
     return struct.pack(
         BPDU_FORMAT,
         BPDU_DEST_MAC,
         get_switch_mac(),
-        38,                 # 38 bytes long fixed payload
+        LLC_LENGTH,
         LLC_HEADER,
-        0,                  # Protocol ID|Protocol version ID|BPDU type
-        0,                  # Flags
-        root_bridge_id.to_bytes(8, byteorder='big'),
+        BPDU_HEADER,                  
+        FLAGS,
+        root_id,
         root_path_cost,
-        own_bridge_id.to_bytes(8, byteorder='big'),
+        bridge_id,
         port_id,
-        1,                  # Message age
-        20,                 # Max age
-        2,                  # Hello time
-        15                  # Forward delay                 
+        MESSAGE_AGE,
+        MAX_AGE,
+        HELLO_TIME,
+        FORWARD_DELAY
     )
+
+def parse_bpdu(data):
+    bpdu = struct.unpack(BPDU_FORMAT, data)
+    bpdu_root_id = int.from_bytes(bpdu[6][0:2], byteorder='big')
+    sender_path_cost = bpdu[7]
+    sender_bridge_id = int.from_bytes(bpdu[8][0:2], byteorder='big')
+    return bpdu_root_id, sender_path_cost, sender_bridge_id
 
 def parse_ethernet_header(data):
     # Unpack the header fields from the byte array
@@ -82,10 +99,8 @@ def send_bdpu_every_sec(trunk_ports):
         time.sleep(1)
 
 def handle_bpdu(data, interface, trunk_ports, root_port):
-    bpdu = struct.unpack(BPDU_FORMAT, data)
-    bpdu_root_id = int.from_bytes(bpdu[6], byteorder='big')
-    sender_path_cost = bpdu[7]
-    sender_bridge_id = int.from_bytes(bpdu[8], byteorder='big')
+    # Extract frame data
+    bpdu_root_id, sender_path_cost, sender_bridge_id = parse_bpdu(data)
 
     global root_bridge_id
     global root_path_cost
@@ -100,7 +115,8 @@ def handle_bpdu(data, interface, trunk_ports, root_port):
         root_port = interface
 
         if were_root_bridge:
-            port_states.update({p: BLOCKED_PORT for p in trunk_ports if p != root_port})
+            port_states.update({p: BLOCKED_PORT for p in trunk_ports 
+                                if p != root_port})
         
         if port_states[root_port] == BLOCKED_PORT:
             port_states[root_port] = DESIGNATED_PORT
@@ -112,11 +128,11 @@ def handle_bpdu(data, interface, trunk_ports, root_port):
             root_path_cost = sender_path_cost + 10
             lock.release()
         
-        elif interface != root_port:
-            if sender_path_cost > root_path_cost:
-                lock.acquire()
-                port_states[interface] = DESIGNATED_PORT
-                lock.release()
+        elif interface != root_port and sender_path_cost > root_path_cost:
+            lock.acquire()
+            port_states[interface] = DESIGNATED_PORT
+            lock.release()
+
     elif sender_bridge_id == own_bridge_id:
         lock.acquire()
         port_states[interface] = BLOCKED_PORT
@@ -124,19 +140,17 @@ def handle_bpdu(data, interface, trunk_ports, root_port):
     
     if root_bridge_id == own_bridge_id:
         lock.acquire()
-        for p in trunk_ports:
-            port_states[p] = DESIGNATED_PORT
+        port_states.update({p: DESIGNATED_PORT for p in trunk_ports})
         lock.release()
 
     return root_port
-        
 
 def read_config(switch_id):
     port_table = {}
     try:
-        with open(f'configs/switch{switch_id}.cfg', 'rt') as config:
-            switch_priority = int(config.readline())
-            for line in config:
+        with open(f'configs/switch{switch_id}.cfg', 'rt') as config_file:
+            switch_priority = int(config_file.readline())
+            for line in config_file:
                 key, value = line.split()
                 port_table[key] = value if value == 'T' else int(value)
             
