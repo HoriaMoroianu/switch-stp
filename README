@@ -1,0 +1,26 @@
+1 2 3
+
+1.  Pentru aceasta cerinta am urmat pseudocodul prezentat in enuntul temei. Am
+retinut intr-un dictionar corespondenta dintre adresa MAC sursa si interfata pe
+care a fost primit pachetul, informatii ce sunt folosite pentru a trimite 
+viitoarele cadre, fara a mai face broadcast.
+
+2.  In functia 'read_config' am extras datele de configuratie a interfetelor,
+pastrate tot intr-un dictionar (nume interfata -> int/'T'). Peste implementarea
+subpunctului anterior am adaugat functia 'send_with_vlan' care foloseste acest
+dictionar pentru a dirija pachetele corect, cu sau fara tag-ul VLAN, in functie
+de caz.
+
+3.  Pentru acest subpunct a fost nevoie ca own_bridge_id, root_bridge_id,
+root_path_cost si port_states sa fie declarate ca variabile globale ce servesc
+drept resurse partajate intre thread-ul ce se ocupa cu dirijarea cadrelor si cel
+care trimite BPDU.
+    La primirea unui BPDU, este apelata functia 'handle_bpdu' ce urmeaza
+pseudocodul din cerinta, care insa incearca sa faca modificari variabilelor
+intr-o maniera sincronizata cu celalat thread, pentru a evita trimiterea unor
+date gresite in noul pachet.
+    De asemenea, se verifica ca interfata pe care urmeaza sa fie trimis un cadru
+sa fie mereu setata ca designated, iar orice cadru care nu este BPDU si este
+primit pe un blocked port va fi aruncat.
+
+-- Horia Moroianu
